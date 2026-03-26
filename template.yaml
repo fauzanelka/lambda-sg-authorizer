@@ -1,0 +1,126 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Security Group Authorizer Lambda Application
+
+Parameters:
+  SecurityGroupId:
+    Type: String
+    Description: Security Group ID to manage
+    Default: ""
+  AccessPort:
+    Type: Number
+    Description: TCP port to grant/revoke access for (e.g. 22 for SSH, 3306 for MySQL, 5432 for PostgreSQL)
+    Default: 3306
+    MinValue: 1
+    MaxValue: 65535
+  S3BucketName:
+    Type: String
+    Description: S3 Bucket name for storing original state
+    Default: "sg-authorizer-state"
+  BasicAuthUsername:
+    Type: String
+    Description: Username for HTTP Basic Authentication
+    Default: "admin"
+    NoEcho: false
+  BasicAuthPassword:
+    Type: String
+    Description: Password for HTTP Basic Authentication
+    NoEcho: true
+    MinLength: 8
+
+Globals:
+  Function:
+    Timeout: 60
+    MemorySize: 256
+    Runtime: provided.al2
+    Architectures:
+      - arm64
+    Environment:
+      Variables:
+        SECURITY_GROUP_ID: !Ref SecurityGroupId
+        ACCESS_PORT: !Ref AccessPort
+        S3_BUCKET_NAME: !Ref S3BucketName
+        LOG_LEVEL: DEBUG
+        BASIC_AUTH_USERNAME: !Ref BasicAuthUsername
+        BASIC_AUTH_PASSWORD: !Ref BasicAuthPassword
+
+Resources:
+  # S3 Bucket for storing original state
+  StateBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref S3BucketName
+      VersioningConfiguration:
+        Status: Enabled
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  # Unified Lambda Function for both toggling security group rules and resetting them
+  SGAuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Metadata:
+      BuildMethod: makefile
+    Properties:
+      Handler: bootstrap
+      Runtime: provided.al2
+      FunctionUrlConfig:
+        AuthType: NONE
+      Events:
+        DailyReset:
+          Type: Schedule
+          Properties:
+            Schedule: cron(0 2 * * ? *)  # Every day at 2 AM UTC
+            Input: '{"source": "eventbridge", "action": "reset"}'
+      Policies:
+        - Version: '2012-10-17'
+          Statement:
+            - Effect: Allow
+              Action:
+                - ec2:DescribeSecurityGroups
+                - ec2:AuthorizeSecurityGroupIngress
+                - ec2:RevokeSecurityGroupIngress
+                - ec2:DescribeSecurityGroupRules
+              Resource: "*"
+            - Effect: Allow
+              Action:
+                - s3:GetObject
+                - s3:PutObject
+                - s3:DeleteObject
+              Resource: !Sub "arn:aws:s3:::${StateBucket}/*"
+            - Effect: Allow
+              Action:
+                - s3:ListBucket
+              Resource: !Sub "arn:aws:s3:::${StateBucket}"
+            - Effect: Allow
+              Action:
+                - logs:CreateLogGroup
+                - logs:CreateLogStream
+                - logs:PutLogEvents
+              Resource: "*"
+
+  # CloudWatch Log Group
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${SGAuthorizerFunction}"
+      RetentionInDays: 30
+
+Outputs:
+  FunctionUrl:
+    Description: "Lambda Function URL for managing security group rules"
+    Value: !GetAtt SGAuthorizerFunctionUrl.FunctionUrl
+
+  FunctionArn:
+    Description: "Security Group Authorizer Lambda Function ARN"
+    Value: !GetAtt SGAuthorizerFunction.Arn
+
+  S3BucketName:
+    Description: "S3 Bucket for storing original state"
+    Value: !Ref StateBucket
+
+  BasicAuthUsername:
+    Description: "Username for HTTP Basic Authentication"
+    Value: !Ref BasicAuthUsername

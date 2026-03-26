@@ -1,0 +1,206 @@
+# =============================================================================
+# Image Scan — Trivy
+# =============================================================================
+# Runs two Trivy scans on every pull request:
+#
+#   Job 1 — config-scan:
+#     Scans the Dockerfile and any IaC files for misconfigurations
+#     (exposed ports, running as root, missing USER directive, etc.)
+#
+#   Job 2 — image-scan:
+#     Extracts the base image from the Dockerfile's FROM line and scans it
+#     for known CVEs. Does not require building the image.
+#
+# Triggers: every pull request (any source branch → any target branch)
+#
+# Setup:
+#   1. Copy this file to .github/workflows/image-scan.yml in your repository
+#   2. Adjust SEVERITY below if needed (default: HIGH,CRITICAL)
+#   3. To block the PR on findings set EXIT_CODE to 1 (default).
+#      Set to 0 to report findings without blocking (monitor mode).
+#
+# Results:
+#   - Findings are uploaded to the GitHub Security tab (Code Scanning alerts)
+#   - JSON reports are uploaded as downloadable workflow artifacts
+#   - Job summary shows a findings table inline in the Actions UI
+#
+# Requirements:
+#   - GitHub Code Scanning must be enabled on the repository
+#     (free for public repos; requires GitHub Advanced Security for private)
+# =============================================================================
+
+name: Image Scan
+
+on:
+  pull_request:
+    branches: ["**"]
+
+permissions:
+  contents: read
+  security-events: write   # required for SARIF upload to Security tab
+  pull-requests: write     # allows summary comments on PR
+
+env:
+  SEVERITY: "HIGH,CRITICAL"   # change to CRITICAL for stricter, MEDIUM,HIGH,CRITICAL for broader
+  EXIT_CODE: "1"              # set to 0 to report without blocking the PR
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Job 1 — Dockerfile & IaC misconfiguration scan
+  # ---------------------------------------------------------------------------
+  config-scan:
+    name: Trivy — Dockerfile & IaC
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run Trivy config scan (SARIF)
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: config
+          scan-ref: "."
+          severity: ${{ env.SEVERITY }}
+          exit-code: ${{ env.EXIT_CODE }}
+          format: sarif
+          output: trivy-config.sarif
+
+      - name: Upload SARIF to Security tab
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-config.sarif
+          category: trivy-config
+
+      - name: Run Trivy config scan (JSON artifact)
+        if: always()
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: config
+          scan-ref: "."
+          severity: ${{ env.SEVERITY }}
+          exit-code: "0"          # don't double-fail; result already captured above
+          format: json
+          output: trivy-config.json
+
+      - name: Upload JSON report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-config-report-${{ github.event.pull_request.number }}
+          path: trivy-config.json
+          retention-days: 30
+
+      - name: Write job summary
+        if: always()
+        run: |
+          if [ ! -f trivy-config.json ]; then
+            echo "No config report generated." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          TOTAL=$(jq '[.Results[]? | (.Misconfigurations // []) | length] | add // 0' trivy-config.json)
+          echo "## Trivy — Dockerfile & IaC Scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Severity filter:** \`${{ env.SEVERITY }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Total findings:** ${TOTAL}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${TOTAL}" -gt 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Severity | ID | Title |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.Results[]? | .Misconfigurations[]? |
+              "| \(.Severity) | \(.ID) | \(.Title // "—") |"' \
+              trivy-config.json >> "$GITHUB_STEP_SUMMARY" || true
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Job 2 — Base image vulnerability scan
+  # ---------------------------------------------------------------------------
+  image-scan:
+    name: Trivy — Base Image CVE Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Extract base image from Dockerfile
+        id: base-image
+        run: |
+          if [ ! -f Dockerfile ]; then
+            echo "No Dockerfile found — skipping image scan."
+            echo "image=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          IMAGE=$(grep -m1 "^FROM" Dockerfile | awk '{print $2}' | head -1)
+          if [ "${IMAGE}" = "scratch" ] || [ -z "${IMAGE}" ]; then
+            echo "Base image is '${IMAGE:-empty}' — no scan needed."
+            echo "image=" >> "$GITHUB_OUTPUT"
+          else
+            echo "Base image: ${IMAGE}"
+            echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Run Trivy image scan (SARIF)
+        if: steps.base-image.outputs.image != ''
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.base-image.outputs.image }}
+          severity: ${{ env.SEVERITY }}
+          exit-code: ${{ env.EXIT_CODE }}
+          format: sarif
+          output: trivy-image.sarif
+
+      - name: Upload SARIF to Security tab
+        if: always() && steps.base-image.outputs.image != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image.sarif
+          category: trivy-image
+
+      - name: Run Trivy image scan (JSON artifact)
+        if: always() && steps.base-image.outputs.image != ''
+        uses: aquasecurity/trivy-action@v0.35.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.base-image.outputs.image }}
+          severity: ${{ env.SEVERITY }}
+          exit-code: "0"
+          format: json
+          output: trivy-image.json
+
+      - name: Upload JSON report
+        if: always() && steps.base-image.outputs.image != ''
+        uses: actions/upload-artifact@v6
+        with:
+          name: trivy-image-report-${{ github.event.pull_request.number }}
+          path: trivy-image.json
+          retention-days: 30
+
+      - name: Write job summary
+        if: always()
+        run: |
+          IMAGE="${{ steps.base-image.outputs.image }}"
+          echo "## Trivy — Base Image CVE Scan" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${IMAGE}" ]; then
+            echo "Skipped — no scannable base image found in Dockerfile." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "**Image scanned:** \`${IMAGE}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Severity filter:** \`${{ env.SEVERITY }}\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f trivy-image.json ]; then
+            echo "No report generated." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          TOTAL=$(jq '[.Results[]? | (.Vulnerabilities // []) | length] | add // 0' trivy-image.json)
+          echo "**Total findings:** ${TOTAL}" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${TOTAL}" -gt 0 ]; then
+            echo "" >> "$GITHUB_STEP_SUMMARY"
+            echo "| Severity | CVE | Package | Installed | Fixed |" >> "$GITHUB_STEP_SUMMARY"
+            echo "|---|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+            jq -r '.Results[]? | .Vulnerabilities[]? |
+              "| \(.Severity) | \(.VulnerabilityID) | \(.PkgName) | \(.InstalledVersion) | \(.FixedVersion // "no fix") |"' \
+              trivy-image.json | sort -t'|' -k2 | head -30 >> "$GITHUB_STEP_SUMMARY" || true
+          fi
