@@ -25,6 +25,7 @@ Parameters:
   BasicAuthPassword:
     Type: String
     Description: Password for HTTP Basic Authentication
+    Default: "your-password-here"
     NoEcho: true
     MinLength: 8
 
@@ -45,6 +46,36 @@ Globals:
         BASIC_AUTH_PASSWORD: !Ref BasicAuthPassword
 
 Resources:
+  # KMS Customer Managed Key for S3 bucket encryption
+  StateBucketKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: CMK for encrypting the SG Authorizer state bucket
+      EnableKeyRotation: true
+      KeyPolicy:
+        Version: '2012-10-17'
+        Statement:
+          - Sid: Enable IAM root permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub "arn:aws:iam::${AWS::AccountId}:root"
+            Action: "kms:*"
+            Resource: "*"
+          - Sid: Allow Lambda function to use the key
+            Effect: Allow
+            Principal:
+              AWS: !GetAtt SGAuthorizerFunctionRole.Arn
+            Action:
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: "*"
+
+  StateBucketKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub "alias/${S3BucketName}-key"
+      TargetKeyId: !Ref StateBucketKey
+
   # S3 Bucket for storing original state
   StateBucket:
     Type: AWS::S3::Bucket
@@ -57,6 +88,12 @@ Resources:
         BlockPublicPolicy: true
         IgnorePublicAcls: true
         RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: !Ref StateBucketKey
+            BucketKeyEnabled: true
 
   # Unified Lambda Function for both toggling security group rules and resetting them
   SGAuthorizerFunction:
@@ -96,6 +133,11 @@ Resources:
               Resource: !Sub "arn:aws:s3:::${StateBucket}"
             - Effect: Allow
               Action:
+                - kms:GenerateDataKey
+                - kms:Decrypt
+              Resource: !GetAtt StateBucketKey.Arn
+            - Effect: Allow
+              Action:
                 - logs:CreateLogGroup
                 - logs:CreateLogStream
                 - logs:PutLogEvents
@@ -124,3 +166,7 @@ Outputs:
   BasicAuthUsername:
     Description: "Username for HTTP Basic Authentication"
     Value: !Ref BasicAuthUsername
+
+  StateBucketKeyArn:
+    Description: "KMS CMK ARN used to encrypt the state S3 bucket"
+    Value: !GetAtt StateBucketKey.Arn

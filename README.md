@@ -1,6 +1,6 @@
 # Security Group Authorizer
 
-A serverless AWS Lambda application built with Go that dynamically manages EC2 security group rules based on client IP addresses. The application uses a **unified Lambda function** with **ARM64 architecture** that handles both Lambda Function URLs for direct HTTP access and EventBridge events for automated daily resets. **HTTP Basic Authentication** protects the Function URL endpoints.
+A serverless AWS Lambda application built with Go that dynamically manages EC2 security group rules based on client IP addresses. The application uses a **unified Lambda function** with **ARM64 architecture** that handles both Lambda Function URLs for direct HTTP access and EventBridge events for automated daily resets. **HTTP Basic Authentication** protects the Function URL endpoints. Small changes test.
 
 ## Features
 

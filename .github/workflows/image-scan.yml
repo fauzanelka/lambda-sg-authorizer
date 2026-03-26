@@ -65,6 +65,7 @@ jobs:
           exit-code: ${{ env.EXIT_CODE }}
           format: sarif
           output: trivy-config.sarif
+          limit-severities-for-sarif: true
 
       - name: Upload SARIF to Security tab
         if: always()
@@ -151,6 +152,7 @@ jobs:
           exit-code: ${{ env.EXIT_CODE }}
           format: sarif
           output: trivy-image.sarif
+          limit-severities-for-sarif: true
 
       - name: Upload SARIF to Security tab
         if: always() && steps.base-image.outputs.image != ''
